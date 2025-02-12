@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:glassmorphism/glassmorphism.dart';
@@ -12,8 +13,14 @@ void main() {
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.dark,
+      statusBarIconBrightness: Brightness.light,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarIconBrightness: Brightness.light,
     ),
+  );
+  SystemChrome.setEnabledSystemUIMode(
+    SystemUiMode.edgeToEdge,
+    overlays: [SystemUiOverlay.top],
   );
   runApp(const MyApp());
 }
@@ -70,7 +77,7 @@ class WordCardsScreen extends StatefulWidget {
   State<WordCardsScreen> createState() => _WordCardsScreenState();
 }
 
-class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProviderStateMixin {
+class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final PageController _pageController = PageController(initialPage: 0);
   late AnimationController _animationController;
   late Animation<double> _pageAnimation;
@@ -85,123 +92,84 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
   ];
   final FlutterTts _flutterTts = FlutterTts();
   bool _isSpeaking = false;
+  String _currentAsset = 'assets/word.json';
+  bool _showMeaning = false;
+  bool _isFirstLaunch = true;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initPrefs();
     _initAnimation();
     _initTts();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _showFileSelectionDialog();
-    });
-  }
-
-  @override
-  void dispose() {
-    _pageController.dispose();
-    _animationController.dispose();
-    _flutterTts.stop();
-    super.dispose();
   }
 
   Future<void> _initPrefs() async {
     _prefs = await SharedPreferences.getInstance();
-  }
-
-  Future<void> _loadCurrentPage() async {
-    if (_words.isEmpty) return;
-    final savedPage = _prefs.getInt('current_page') ?? 0;
-    if (savedPage < _words.length) {
-      setState(() {
-        _currentPage = savedPage;
-      });
-      if (_pageController.hasClients) {
-        _pageController.jumpToPage(savedPage);
-      }
+    _isFirstLaunch = _prefs.getBool('has_launched') ?? true;
+    
+    // 恢复显示/隐藏含义的状态
+    final showMeaning = _prefs.getBool('show_meaning') ?? false;
+    setState(() {
+      _showMeaning = showMeaning;
+    });
+    
+    if (_isFirstLaunch) {
+      await _showFileSelectionDialog();
+      await _prefs.setBool('has_launched', false);
+    } else {
+      await _loadLastState();
     }
   }
 
-  void _initAnimation() {
-    _animationController = AnimationController(
-      duration: const Duration(milliseconds: 300),
-      vsync: this,
-    );
-
-    _pageAnimation = Tween<double>(
-      begin: 0.0,
-      end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _animationController,
-      curve: Curves.easeInOut,
-    ));
+  Future<void> _loadLastState() async {
+    try {
+      final lastAsset = _prefs.getString('last_asset') ?? 'assets/word.json';
+      final lastPage = _prefs.getInt('last_page') ?? 0;
+      
+      // 先加载单词数据
+      await _loadWordsFromAsset(lastAsset);
+      
+      // 确保页码在有效范围内
+      if (_words.isNotEmpty) {
+        final validPage = lastPage.clamp(0, _words.length - 1);
+        setState(() {
+          _currentPage = validPage;
+          _currentAsset = lastAsset;
+        });
+        
+        // 等待下一帧确保 PageController 已经初始化
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_pageController.hasClients) {
+            _pageController.jumpToPage(validPage);
+          }
+        });
+      }
+    } catch (e) {
+      print('恢复状态时出错: $e');
+      // 如果恢复失败，显示文件选择对话框
+      await _showFileSelectionDialog();
+    }
   }
 
-  Future<void> _initTts() async {
-    await _flutterTts.setLanguage("en-US");
-    await _flutterTts.setSpeechRate(0.4);  // 降低语速
-    await _flutterTts.setVolume(1.0);
-    await _flutterTts.setPitch(1.0);
-    
-    _flutterTts.setCompletionHandler(() {
-      _isSpeaking = false;
+  Future<void> _saveCurrentState() async {
+    try {
+      await _prefs.setString('last_asset', _currentAsset);
+      await _prefs.setInt('last_page', _currentPage);
+      await _prefs.setBool('show_meaning', _showMeaning);
+    } catch (e) {
+      print('保存状态时出错: $e');
+    }
+  }
+
+  void _toggleMeaning() {
+    setState(() {
+      _showMeaning = !_showMeaning;
+      _prefs.setBool('show_meaning', _showMeaning);
     });
   }
 
-  Future<void> _speakText(String text) async {
-    if (_isSpeaking) {
-      await _flutterTts.stop();
-      await Future.delayed(const Duration(milliseconds: 300));  // 等待停止完成
-    }
-    _isSpeaking = true;
-    await _flutterTts.speak(text);
-  }
-
-  // 显示文件选择对话框
-  Future<void> _showFileSelectionDialog() async {
-    if (!mounted) return;
-
-    try {
-      final manifestContent = await DefaultAssetBundle.of(context).loadString('AssetManifest.json');
-      final Map<String, dynamic> manifestMap = json.decode(manifestContent);
-      final jsonFiles = manifestMap.keys.where((String key) => 
-        key.startsWith('assets/') && key.endsWith('.json')
-      ).toList();
-
-      if (!mounted) return;
-
-      await showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => AlertDialog(
-          title: const Text('选择单词文件'),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: jsonFiles.length,
-              itemBuilder: (context, index) {
-                final fileName = jsonFiles[index].split('/').last;
-                return ListTile(
-                  leading: const Icon(Icons.description),
-                  title: Text(fileName),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    await _loadWordsFromAsset(jsonFiles[index]);
-                  },
-                );
-              },
-            ),
-          ),
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      _showErrorDialog('加载文件列表失败：$e');
-    }
-  }
-
-  // 从指定的 asset 文件加载单词
   Future<void> _loadWordsFromAsset(String assetPath) async {
     try {
       final String jsonString = await rootBundle.loadString(assetPath);
@@ -228,6 +196,7 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
         _words = validJsonList.map((w) => Word.fromJson(w)).toList();
         _originalWords = List.from(_words);
         _currentPage = 0;
+        _currentAsset = assetPath;
       });
 
       await Future.delayed(Duration.zero);
@@ -243,6 +212,7 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
           duration: const Duration(seconds: 2),
         ),
       );
+      _saveCurrentState();
     } catch (e) {
       if (!mounted) return;
       _showErrorDialog('加载失败：$e');
@@ -320,106 +290,227 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
     await _prefs.setInt('current_page', page);
   }
 
+  void _initAnimation() {
+    _animationController = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
+
+    _pageAnimation = CurvedAnimation(
+      parent: _animationController,
+      curve: Curves.easeInOutCubic,
+    ).drive(Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ));
+  }
+
+  Future<void> _initTts() async {
+    await _flutterTts.setLanguage("en-US");
+    await _flutterTts.setSpeechRate(0.4);  // 降低语速
+    await _flutterTts.setVolume(1.0);
+    await _flutterTts.setPitch(1.0);
+    
+    _flutterTts.setCompletionHandler(() {
+      _isSpeaking = false;
+    });
+  }
+
+  Future<void> _speakText(String text) async {
+    if (_isSpeaking) {
+      await _flutterTts.stop();
+      await Future.delayed(const Duration(milliseconds: 300));  // 等待停止完成
+    }
+    _isSpeaking = true;
+    await _flutterTts.speak(text);
+  }
+
+  // 显示文件选择对话框
+  Future<void> _showFileSelectionDialog() async {
+    if (!mounted) return;
+
+    try {
+      final manifestContent = await DefaultAssetBundle.of(context).loadString('AssetManifest.json');
+      final Map<String, dynamic> manifestMap = json.decode(manifestContent);
+      final jsonFiles = manifestMap.keys.where((String key) => 
+        key.startsWith('assets/') && key.endsWith('.json')
+      ).toList();
+
+      if (jsonFiles.isEmpty) {
+        _showErrorDialog('没有找到可用的单词文件');
+        return;
+      }
+
+      if (!mounted) return;
+
+      await showDialog(
+        context: context,
+        barrierDismissible: !_isFirstLaunch,  // 首次启动时不允许点击外部关闭
+        builder: (context) => AlertDialog(
+          title: Text(_isFirstLaunch ? '选择要学习的单词文件' : '切换单词文件'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_isFirstLaunch)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 16.0),
+                    child: Text('欢迎使用单词学习应用！\n请选择一个单词文件开始学习。'),
+                  ),
+                SizedBox(
+                  height: 300,  // 限制列表高度
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: jsonFiles.length,
+                    itemBuilder: (context, index) {
+                      final fileName = jsonFiles[index].split('/').last;
+                      return ListTile(
+                        leading: const Icon(Icons.description),
+                        title: Text(fileName),
+                        subtitle: Text('点击加载这个文件'),
+                        onTap: () async {
+                          Navigator.pop(context);
+                          await _loadWordsFromAsset(jsonFiles[index]);
+                          if (_isFirstLaunch) {
+                            setState(() {
+                              _isFirstLaunch = false;
+                            });
+                          }
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: _isFirstLaunch ? null : [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _showErrorDialog('加载文件列表失败：$e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(40.0),
-        child: AppBar(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          flexibleSpace: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  Colors.blue.shade300,
-                  Colors.purple.shade300,
-                  Colors.pink.shade300,
+      extendBodyBehindAppBar: true,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: _words.isEmpty 
+          ? const Text('单词学习',
+              style: TextStyle(
+                fontSize: 20,
+                color: Colors.white,
+                shadows: [
+                  Shadow(
+                    offset: Offset(2, 2),
+                    blurRadius: 4,
+                    color: Colors.black38,
+                  ),
+                ],
+              ),
+            )
+          : Text(
+              '${_currentPage + 1}/${_words.length}',
+              style: const TextStyle(
+                fontSize: 20,
+                color: Colors.white,
+                shadows: [
+                  Shadow(
+                    offset: Offset(2, 2),
+                    blurRadius: 4,
+                    color: Colors.black38,
+                  ),
                 ],
               ),
             ),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.file_open, color: Colors.white),
+            onPressed: _showFileSelectionDialog,
+            tooltip: '切换单词文件',
           ),
-          title: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(
-                        value: (_currentPage + 1) / _words.length,
-                        backgroundColor: Colors.white24,
-                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                        minHeight: 6,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${_currentPage + 1} / ${_words.length}',
-                      style: GoogleFonts.notoSans(
-                        fontSize: 12,
-                        color: Colors.white70,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 16),
-              IconButton(
-                icon: const Icon(
-                  Icons.folder_open,
-                  color: Colors.white,
-                  size: 20,
-                ),
-                onPressed: _showFileSelectionDialog,
-                tooltip: '选择单词文件',
-              ),
-            ],
-          ),
-        ),
+        ],
       ),
       body: _words.isEmpty
           ? const Center(child: CircularProgressIndicator())
           : PageView.builder(
               controller: _pageController,
-              itemCount: _words.length,
-              onPageChanged: (index) async {
+              onPageChanged: (page) async {
                 setState(() {
-                  _currentPage = index;
+                  _currentPage = page;
                 });
-                _saveCurrentPage(index);
+                _saveCurrentState();
                 // 等待一小段时间确保页面切换动画完成
-                await Future.delayed(const Duration(milliseconds: 300));
-                await _speakText(_words[index].word);
+                await Future.delayed(const Duration(milliseconds: 100));
+                await _speakText(_words[page].word);
               },
+              itemCount: _words.length,
               itemBuilder: (context, index) {
-                return WordCard(
-                  word: _words[index],
-                  onNext: () {
-                    if (index < _words.length - 1) {
-                      _pageController.nextPage(
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeInOut,
-                      );
-                    }
+                return AnimatedBuilder(
+                  animation: _pageAnimation,
+                  builder: (context, child) {
+                    return FadeTransition(
+                      opacity: _pageAnimation,
+                      child: child,
+                    );
                   },
-                  onPrevious: () {
-                    if (index > 0) {
-                      _pageController.previousPage(
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeInOut,
-                      );
-                    }
-                  },
+                  child: WordCard(
+                    word: _words[index],
+                    onNext: () {
+                      if (index < _words.length - 1) {
+                        _pageController.nextPage(
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOutCubic,
+                        );
+                      }
+                    },
+                    onPrevious: () {
+                      if (index > 0) {
+                        _pageController.previousPage(
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOutCubic,
+                        );
+                      }
+                    },
+                    showMeaning: _showMeaning,
+                    onToggleMeaning: _toggleMeaning,
+                  ),
                 );
               },
             ),
       floatingActionButton: null,
     );
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _saveCurrentState(); // 保存最后的状态
+    _pageController.dispose();
+    _animationController.dispose();
+    _flutterTts.stop();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused || 
+        state == AppLifecycleState.inactive || 
+        state == AppLifecycleState.detached) {
+      _saveCurrentState(); // 在应用退出或切换到后台时保存状态
+    }
   }
 }
 
@@ -427,12 +518,16 @@ class WordCard extends StatefulWidget {
   final Word word;
   final VoidCallback onNext;
   final VoidCallback onPrevious;
+  final bool showMeaning;
+  final VoidCallback onToggleMeaning;
 
   const WordCard({
     Key? key,
     required this.word,
     required this.onNext,
     required this.onPrevious,
+    required this.showMeaning,
+    required this.onToggleMeaning,
   }) : super(key: key);
 
   @override
@@ -442,7 +537,6 @@ class WordCard extends StatefulWidget {
 class _WordCardState extends State<WordCard> {
   final FlutterTts flutterTts = FlutterTts();
   bool _isSpeaking = false;
-  bool _showMeaning = false;
 
   @override
   void initState() {
@@ -467,12 +561,6 @@ class _WordCardState extends State<WordCard> {
     _isSpeaking = false;
   }
 
-  void _toggleMeaning() {
-    setState(() {
-      _showMeaning = !_showMeaning;
-    });
-  }
-
   @override
   void dispose() {
     flutterTts.stop();
@@ -481,7 +569,6 @@ class _WordCardState extends State<WordCard> {
 
   @override
   Widget build(BuildContext context) {
-    final Size screenSize = MediaQuery.of(context).size;
     return GestureDetector(
       onHorizontalDragEnd: (details) {
         if (details.primaryVelocity! > 0) {
@@ -490,7 +577,7 @@ class _WordCardState extends State<WordCard> {
           widget.onNext();
         }
       },
-      onDoubleTap: _toggleMeaning,
+      onDoubleTap: widget.onToggleMeaning,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 24.0),
         decoration: BoxDecoration(
@@ -530,7 +617,7 @@ class _WordCardState extends State<WordCard> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                if (_showMeaning) Center(
+                if (widget.showMeaning) Center(
                   child: Text(
                     widget.word.chineseMeaning,
                     style: Theme.of(context).textTheme.headlineSmall?.copyWith(
@@ -546,7 +633,7 @@ class _WordCardState extends State<WordCard> {
                     textAlign: TextAlign.center,
                   ),
                 ),
-                if (!_showMeaning) Center(
+                if (!widget.showMeaning) Center(
                   child: Text(
                     '双击显示中文含义',
                     style: Theme.of(context).textTheme.bodyLarge?.copyWith(
