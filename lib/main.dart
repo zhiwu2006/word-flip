@@ -95,6 +95,8 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
   String _currentAsset = 'assets/word.json';
   bool _showMeaning = false;
   bool _isFirstLaunch = true;
+  List<Word> _unfamiliarWords = [];  // 新增不熟悉单词列表
+  bool _isShowingUnfamiliar = false;  // 是否正在显示不熟悉单词列表
 
   @override
   void initState() {
@@ -103,6 +105,7 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
     _initPrefs();
     _initAnimation();
     _initTts();
+    _loadUnfamiliarWords();  // 加载不熟悉单词列表
   }
 
   Future<void> _initPrefs() async {
@@ -111,8 +114,12 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
     
     // 恢复显示/隐藏含义的状态
     final showMeaning = _prefs.getBool('show_meaning') ?? false;
+    // 恢复不熟悉单词列表的显示状态
+    final showUnfamiliar = _prefs.getBool('show_unfamiliar') ?? false;
+    
     setState(() {
       _showMeaning = showMeaning;
+      _isShowingUnfamiliar = showUnfamiliar;
     });
     
     if (_isFirstLaunch) {
@@ -131,24 +138,32 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
       // 先加载单词数据
       await _loadWordsFromAsset(lastAsset);
       
+      // 加载不熟悉单词列表
+      await _loadUnfamiliarWords();
+      
       // 确保页码在有效范围内
       if (_words.isNotEmpty) {
         final validPage = lastPage.clamp(0, _words.length - 1);
         setState(() {
           _currentPage = validPage;
           _currentAsset = lastAsset;
+          
+          // 根据保存的状态决定显示哪个列表
+          if (_isShowingUnfamiliar) {
+            _words = List.from(_unfamiliarWords);
+            _currentPage = _currentPage.clamp(0, _unfamiliarWords.length - 1);
+          }
         });
         
         // 等待下一帧确保 PageController 已经初始化
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_pageController.hasClients) {
-            _pageController.jumpToPage(validPage);
+            _pageController.jumpToPage(_currentPage);
           }
         });
       }
     } catch (e) {
       print('恢复状态时出错: $e');
-      // 如果恢复失败，显示文件选择对话框
       await _showFileSelectionDialog();
     }
   }
@@ -158,6 +173,8 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
       await _prefs.setString('last_asset', _currentAsset);
       await _prefs.setInt('last_page', _currentPage);
       await _prefs.setBool('show_meaning', _showMeaning);
+      await _prefs.setBool('show_unfamiliar', _isShowingUnfamiliar);
+      await _saveUnfamiliarWords();
     } catch (e) {
       print('保存状态时出错: $e');
     }
@@ -399,6 +416,86 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
     }
   }
 
+  Future<void> _loadUnfamiliarWords() async {
+    try {
+      final unfamiliarJson = _prefs.getString('unfamiliar_words');
+      if (unfamiliarJson != null) {
+        final List<dynamic> jsonList = json.decode(unfamiliarJson);
+        setState(() {
+          _unfamiliarWords = jsonList.map((w) => Word.fromJson(w)).toList();
+        });
+      }
+    } catch (e) {
+      print('加载不熟悉单词列表时出错: $e');
+    }
+  }
+
+  Future<void> _saveUnfamiliarWords() async {
+    try {
+      final jsonList = _unfamiliarWords.map((w) => w.toJson()).toList();
+      await _prefs.setString('unfamiliar_words', json.encode(jsonList));
+    } catch (e) {
+      print('保存不熟悉单词列表时出错: $e');
+    }
+  }
+
+  void _toggleUnfamiliarMode() {
+    setState(() {
+      _isShowingUnfamiliar = !_isShowingUnfamiliar;
+      if (_isShowingUnfamiliar) {
+        // 切换到不熟悉单词列表
+        _words = List.from(_unfamiliarWords);
+      } else {
+        // 切换回原始单词列表
+        _words = List.from(_originalWords);
+      }
+      _currentPage = 0;
+      _pageController.jumpToPage(0);
+    });
+    // 保存当前状态
+    _saveCurrentState();
+  }
+
+  void _addToUnfamiliar() {
+    if (_currentPage >= 0 && _currentPage < _words.length) {
+      final currentWord = _words[_currentPage];
+      // 检查单词是否已在不熟悉列表中
+      if (!_unfamiliarWords.any((w) => w.word == currentWord.word)) {
+        setState(() {
+          final updatedWord = currentWord.copyWith(isUnfamiliar: true);
+          _unfamiliarWords.add(updatedWord);
+          
+          // 更新原始列表中的单词状态
+          final index = _originalWords.indexWhere((w) => w.word == currentWord.word);
+          if (index != -1) {
+            _originalWords[index] = updatedWord;
+          }
+          
+          // 如果当前正在显示原始列表，也更新当前显示的列表
+          if (!_isShowingUnfamiliar) {
+            _words[_currentPage] = updatedWord;
+          }
+        });
+        _saveUnfamiliarWords();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('已添加到不熟悉单词列表'),
+            duration: Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('该单词已在不熟悉列表中'),
+            duration: Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -436,6 +533,11 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
             ),
         centerTitle: true,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.book_outlined, color: Colors.white),  // 统一使用outlined风格和白色
+            onPressed: _toggleUnfamiliarMode,
+            tooltip: _isShowingUnfamiliar ? '返回所有单词' : '查看不熟悉单词',
+          ),
           IconButton(
             icon: const Icon(Icons.file_open, color: Colors.white),
             onPressed: _showFileSelectionDialog,
@@ -490,14 +592,30 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
                 );
               },
             ),
-      floatingActionButton: null,
+      floatingActionButton: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          Opacity(
+            opacity: 0.8,  // 设置透明度
+            child: FloatingActionButton(
+              heroTag: 'unfamiliar',
+              onPressed: _addToUnfamiliar,
+              child: Icon(Icons.add, color: Colors.white),
+              backgroundColor: Colors.blue.withOpacity(0.7),  // 设置半透明背景
+              elevation: 4,  // 降低阴影
+              tooltip: '添加到不熟悉单词列表',
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   @override
   void dispose() {
+    // 在组件销毁前保存状态
+    _saveCurrentState();
     WidgetsBinding.instance.removeObserver(this);
-    _saveCurrentState(); // 保存最后的状态
     _pageController.dispose();
     _animationController.dispose();
     _flutterTts.stop();
@@ -506,10 +624,9 @@ class _WordCardsScreenState extends State<WordCardsScreen> with SingleTickerProv
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused || 
-        state == AppLifecycleState.inactive || 
-        state == AppLifecycleState.detached) {
-      _saveCurrentState(); // 在应用退出或切换到后台时保存状态
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      // 当应用进入后台或失去焦点时保存状态
+      _saveCurrentState();
     }
   }
 }

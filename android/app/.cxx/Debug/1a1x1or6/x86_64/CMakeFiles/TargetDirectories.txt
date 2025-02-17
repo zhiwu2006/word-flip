@@ -1,0 +1,2 @@
+/Volumes/附属盘/flip/wordsjson/android/app/.cxx/Debug/1a1x1or6/x86_64/CMakeFiles/edit_cache.dir
+/Volumes/附属盘/flip/wordsjson/android/app/.cxx/Debug/1a1x1or6/x86_64/CMakeFiles/rebuild_cache.dir
